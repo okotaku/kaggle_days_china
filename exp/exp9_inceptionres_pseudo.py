@@ -15,9 +15,9 @@ from torch.utils.data import DataLoader
 
 import sys
 
-sys.path.append("../input/src-kaggledays/")
+sys.path.append("../input/src-kaggledays2/")
 from util_tools import seed_torch
-from model import CnnModel
+from model import CnnModel, Efficient
 from datasets import KDDataset, KDDatasetTest
 from logger import setup_logger, LOGGER
 from trainer import train_one_epoch, validate, predict
@@ -33,7 +33,7 @@ TRAIN_PATH = os.path.join(DATA_DIR, "train.csv")
 TEST_PATH = os.path.join(DATA_DIR, "test.csv")
 ID_COLUMNS = "id"
 TARGET_COLUMNS = ["is_star"]
-# TARGET_COLUMNS = ["is_star", "loc_x", "loc_y"]
+#TARGET_COLUMNS = ["is_star", "loc_x", "loc_y"]
 N_CLASSES = len(TARGET_COLUMNS)
 
 # ===============
@@ -44,10 +44,11 @@ device = "cuda"
 img_size = 224
 batch_size = 32
 fold_id = 0
-epochs = 20
-EXP_ID = "exp1_seresnext"
+epochs = 25
+EXP_ID = "exp9_inceptionresnetv2"
 model_path = None
 save_path = '{}_fold{}.pth'.format(EXP_ID, fold_id)
+PSEUDO_PATH = "../input/fork-of-kaggle-days-ensemble/exp4_tta4.csv"
 
 setup_logger(out_file=LOGGER_PATH)
 seed_torch(SEED)
@@ -66,12 +67,21 @@ def main():
         df = pd.read_csv(TRAIN_PATH)
         df["loc_x"] = df["loc_x"] / 100
         df["loc_y"] = df["loc_y"] / 100
+
+        pseudo_df = pd.read_csv(PSEUDO_PATH)
+        pseudo_df = pseudo_df[(pseudo_df.is_star < 0.2) &(pseudo_df.is_star > 0.8)].reset_index(drop=True)
+        pseudo_df["is_star"] = (pseudo_df["is_star"] > 0.5).astype("int64")
+        df = df.append(pseudo_df).reset_index(drop=True)
+
         y = df[TARGET_COLUMNS].values
         df = df[[ID_COLUMNS]]
         gc.collect()
 
     with timer("split data"):
-        folds = StratifiedKFold(n_splits=5, shuffle=True, random_state=0).split(df, y)
+        if y.shape[1] == 1:
+            folds = StratifiedKFold(n_splits=5, shuffle=True, random_state=0).split(df, y)
+        else:
+            folds = StratifiedKFold(n_splits=5, shuffle=True, random_state=0).split(df, y[:, 0])
         for n_fold, (train_index, val_index) in enumerate(folds):
             train_df = df.loc[train_index]
             val_df = df.loc[val_index]
@@ -82,17 +92,20 @@ def main():
 
     with timer('preprocessing'):
         train_augmentation = Compose([
-            HorizontalFlip(p=0.5),
+            CenterCrop(80, 80, p=0.5),
+            Flip(p=0.5),
             OneOf([
                 ElasticTransform(p=0.5, alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03),
                 GridDistortion(p=0.5),
                 OpticalDistortion(p=1, distort_limit=2, shift_limit=0.5)
             ], p=0.5),
             RandomBrightnessContrast(p=0.5),
+            Blur(blur_limit=8, p=0.5),
             ShiftScaleRotate(rotate_limit=20, p=0.5),
             Resize(img_size, img_size, p=1)
         ])
         val_augmentation = Compose([
+            CenterCrop(80, 80, p=0.5),
             Resize(img_size, img_size, p=1)
         ])
 
@@ -107,8 +120,8 @@ def main():
         gc.collect()
 
     with timer('create model'):
-        model = CnnModel(num_classes=N_CLASSES, encoder="se_resnext50_32x4d",
-                         pretrained="../input/pytorch-pretrained-models/se_resnext50_32x4d-a260b3a4.pth",
+        model = CnnModel(num_classes=N_CLASSES, encoder="inceptionresnetv2",
+                         pretrained="../input/pytorch-pretrained-models/inceptionresnetv2-520b38e4.pth",
                          pool_type="avg")
         if model_path is not None:
             model.load_state_dict(torch.load(model_path))
@@ -121,6 +134,7 @@ def main():
 
     with timer('train'):
         best_score = 0
+        best_epoch = 0
         for epoch in range(1, epochs + 1):
             seed_torch(SEED + epoch)
 
@@ -129,7 +143,7 @@ def main():
                     param_group['lr'] = param_group['lr'] * 0.1
 
             LOGGER.info("Starting {} epoch...".format(epoch))
-            tr_loss = train_one_epoch(model, train_loader, criterion, optimizer, device, N_CLASSES)
+            tr_loss = train_one_epoch(model, train_loader, criterion, optimizer, device, N_CLASSES, cutmix_prob=0.3)
             LOGGER.info('Mean train loss: {}'.format(round(tr_loss, 5)))
 
             y_pred, target, val_loss = validate(model, val_loader, criterion, device, N_CLASSES)
@@ -139,25 +153,28 @@ def main():
 
             if score > best_score:
                 best_score = score
+                best_epoch = epoch
                 np.save("y_pred.npy", y_pred)
                 torch.save(model.state_dict(), save_path)
 
         np.save("target.npy", target)
+        LOGGER.info('best score: {} on epoch: {}'.format(round(best_score, 5), best_epoch))
 
     with timer('predict'):
         test_df = pd.read_csv(TEST_PATH)
         test_ids = test_df["id"].values
 
         test_augmentation = Compose([
+            CenterCrop(80, 80, p=0.5),
             Resize(img_size, img_size, p=1)
         ])
         test_dataset = KDDatasetTest(test_df, img_size, TEST_IMAGE_PATH, id_colname=ID_COLUMNS,
-                                     transforms=test_augmentation, n_tta=2)
+                                     transforms=test_augmentation, n_tta=4)
         test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
 
         model.load_state_dict(torch.load(save_path))
 
-        pred = predict(model, test_loader, device, N_CLASSES, n_tta=2)
+        pred = predict(model, test_loader, device, N_CLASSES, n_tta=4)
         print(pred.shape)
         results = pd.DataFrame({"id": test_ids,
                                 "is_star": pred.reshape(-1)})

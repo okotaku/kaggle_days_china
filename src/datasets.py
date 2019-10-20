@@ -24,6 +24,7 @@ class KDDataset(Dataset):
                  transforms=None,
                  means=[0.485, 0.456, 0.406],
                  stds=[0.229, 0.224, 0.225],
+                 orig_y=False
                  ):
         self.df = df
         self.y = y
@@ -35,16 +36,21 @@ class KDDataset(Dataset):
         self.id_colname = id_colname
         self.img_type = img_type
         self.crop_rate = crop_rate
+        self.orig_y = orig_y
 
     def __len__(self):
         return self.df.shape[0]
 
     def __getitem__(self, idx):
         target = self.y[idx]
+        if self.orig_y is None:
+            true_target = target
+        else:
+            true_target = self.orig_y[idx]
 
         cur_idx_row = self.df.iloc[idx]
         img_id = cur_idx_row[self.id_colname]
-        if target[0] == 0:
+        if true_target[0] == 0:
             dirs = "nonstar"
         else:
             dirs = "star"
@@ -121,13 +127,10 @@ class KDDatasetTest(Dataset):
             imgs.append(torch.FloatTensor(flip_img))
 
         if self.n_tta >= 4:
-            img_tta = img_tta / 255
-            img_tta -= self.means
-            img_tta /= self.stds
-            img_tta = img_tta.transpose((2, 0, 1))
-            imgs.append(torch.FloatTensor(img_tta))
-            flip_img_tta = img_tta[:, :, ::-1].copy()
-            imgs.append(torch.FloatTensor(flip_img_tta))
+            flip_img2 = img[:, ::-1, :].copy()
+            imgs.append(torch.FloatTensor(flip_img2))
+            flip_img3 = img[:, ::-1, ::-1].copy()
+            imgs.append(torch.FloatTensor(flip_img3))
 
         return imgs
 

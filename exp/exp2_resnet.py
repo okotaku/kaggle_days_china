@@ -42,10 +42,10 @@ N_CLASSES = len(TARGET_COLUMNS)
 SEED = np.random.randint(100000)
 device = "cuda"
 img_size = 224
-batch_size = 32
+batch_size = 128
 fold_id = 0
 epochs = 20
-EXP_ID = "exp1_seresnext"
+EXP_ID = "exp2_seresnext"
 model_path = None
 save_path = '{}_fold{}.pth'.format(EXP_ID, fold_id)
 
@@ -107,8 +107,8 @@ def main():
         gc.collect()
 
     with timer('create model'):
-        model = CnnModel(num_classes=N_CLASSES, encoder="se_resnext50_32x4d",
-                         pretrained="../input/pytorch-pretrained-models/se_resnext50_32x4d-a260b3a4.pth",
+        model = CnnModel(num_classes=N_CLASSES, encoder="resnet34",
+                         pretrained="../input/pytorch-pretrained-models/resnet34-333f7ec4pth",
                          pool_type="avg")
         if model_path is not None:
             model.load_state_dict(torch.load(model_path))
@@ -121,6 +121,7 @@ def main():
 
     with timer('train'):
         best_score = 0
+        best_epoch = 0
         for epoch in range(1, epochs + 1):
             seed_torch(SEED + epoch)
 
@@ -139,10 +140,12 @@ def main():
 
             if score > best_score:
                 best_score = score
+                best_epoch = epoch
                 np.save("y_pred.npy", y_pred)
                 torch.save(model.state_dict(), save_path)
 
         np.save("target.npy", target)
+        LOGGER.info('best score: {} on epoch: {}'.format(round(best_score, 5), best_epoch))
 
     with timer('predict'):
         test_df = pd.read_csv(TEST_PATH)

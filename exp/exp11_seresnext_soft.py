@@ -3,6 +3,7 @@
 # ===============
 import os
 import gc
+import copy
 import time
 import pandas as pd
 import numpy as np
@@ -15,9 +16,9 @@ from torch.utils.data import DataLoader
 
 import sys
 
-sys.path.append("../input/src-kaggledays/")
+sys.path.append("../input/src-kaggledays2/")
 from util_tools import seed_torch
-from model import CnnModel
+from model import CnnModel, Efficient
 from datasets import KDDataset, KDDatasetTest
 from logger import setup_logger, LOGGER
 from trainer import train_one_epoch, validate, predict
@@ -32,8 +33,8 @@ LOGGER_PATH = "log.txt"
 TRAIN_PATH = os.path.join(DATA_DIR, "train.csv")
 TEST_PATH = os.path.join(DATA_DIR, "test.csv")
 ID_COLUMNS = "id"
-TARGET_COLUMNS = ["is_star"]
-# TARGET_COLUMNS = ["is_star", "loc_x", "loc_y"]
+# TARGET_COLUMNS = ["is_star"]
+TARGET_COLUMNS = ["is_star", "loc_x", "loc_y"]
 N_CLASSES = len(TARGET_COLUMNS)
 
 # ===============
@@ -45,9 +46,17 @@ img_size = 224
 batch_size = 32
 fold_id = 0
 epochs = 20
-EXP_ID = "exp1_seresnext"
+EXP_ID = "exp11_seres"
 model_path = None
+n_tta = 4
 save_path = '{}_fold{}.pth'.format(EXP_ID, fold_id)
+npy_path = [
+    "../input/exp4-kaggle-days-multi-seres/y_pred.npy",
+    "../input/kaggle-days-exp4-fold1/y_pred.npy",
+    "../input/kaggle-days-exp4-fold2/y_pred.npy",
+    "../input/exp4kaggledaysmultiseres-fold3-result/y_pred.npy",
+    "../input/exp4kaggledaysmultiseres-fold4-result/y_pred.npy",
+]
 
 setup_logger(out_file=LOGGER_PATH)
 seed_torch(SEED)
@@ -67,22 +76,36 @@ def main():
         df["loc_x"] = df["loc_x"] / 100
         df["loc_y"] = df["loc_y"] / 100
         y = df[TARGET_COLUMNS].values
+        y_orig = copy.deepcopy(y)
         df = df[[ID_COLUMNS]]
         gc.collect()
 
+    with timer("soft labeling"):
+        if y.shape[1] == 1:
+            folds = StratifiedKFold(n_splits=5, shuffle=True, random_state=0).split(df, y)
+        else:
+            folds = StratifiedKFold(n_splits=5, shuffle=True, random_state=0).split(df, y[:, 0])
+        for n_fold, (train_index, val_index) in enumerate(folds):
+            y[val_index, 0] = np.load(npy_path[n_fold])
+
     with timer("split data"):
-        folds = StratifiedKFold(n_splits=5, shuffle=True, random_state=0).split(df, y)
+        if y_orig.shape[1] == 1:
+            folds = StratifiedKFold(n_splits=5, shuffle=True, random_state=0).split(df, y_orig)
+        else:
+            folds = StratifiedKFold(n_splits=5, shuffle=True, random_state=0).split(df, y_orig[:, 0])
         for n_fold, (train_index, val_index) in enumerate(folds):
             train_df = df.loc[train_index]
             val_df = df.loc[val_index]
             y_train = y[train_index]
             y_val = y[val_index]
+            y_train_orig = y_orig[:, 0][val_index]
+            y_val_orig = y_orig[:, 0][val_index]
             if n_fold == fold_id:
                 break
 
     with timer('preprocessing'):
         train_augmentation = Compose([
-            HorizontalFlip(p=0.5),
+            Flip(p=0.5),
             OneOf([
                 ElasticTransform(p=0.5, alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03),
                 GridDistortion(p=0.5),
@@ -97,11 +120,11 @@ def main():
         ])
 
         train_dataset = KDDataset(train_df, y_train, img_size, IMAGE_PATH, id_colname=ID_COLUMNS,
-                                  transforms=train_augmentation)
+                                  transforms=train_augmentation, orig_y=y_train_orig)
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
 
         val_dataset = KDDataset(val_df, y_val, img_size, IMAGE_PATH, id_colname=ID_COLUMNS,
-                                transforms=val_augmentation)
+                                transforms=val_augmentation, orig_y=y_val_orig)
         val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
         del df, train_dataset, val_dataset
         gc.collect()
@@ -121,6 +144,7 @@ def main():
 
     with timer('train'):
         best_score = 0
+        best_epoch = 0
         for epoch in range(1, epochs + 1):
             seed_torch(SEED + epoch)
 
@@ -129,20 +153,22 @@ def main():
                     param_group['lr'] = param_group['lr'] * 0.1
 
             LOGGER.info("Starting {} epoch...".format(epoch))
-            tr_loss = train_one_epoch(model, train_loader, criterion, optimizer, device, N_CLASSES)
+            tr_loss = train_one_epoch(model, train_loader, criterion, optimizer, device, N_CLASSES, cutmix_prob=0.0)
             LOGGER.info('Mean train loss: {}'.format(round(tr_loss, 5)))
 
             y_pred, target, val_loss = validate(model, val_loader, criterion, device, N_CLASSES)
-            score = roc_auc_score(target, y_pred)
+            score = roc_auc_score(y_val_orig, y_pred)
             LOGGER.info('Mean val loss: {}'.format(round(val_loss, 5)))
             LOGGER.info('val score: {}'.format(round(score, 5)))
 
             if score > best_score:
                 best_score = score
+                best_epoch = epoch
                 np.save("y_pred.npy", y_pred)
                 torch.save(model.state_dict(), save_path)
 
-        np.save("target.npy", target)
+        np.save("y_val_orig.npy", y_val_orig)
+        LOGGER.info('best score: {} on epoch: {}'.format(round(best_score, 5), best_epoch))
 
     with timer('predict'):
         test_df = pd.read_csv(TEST_PATH)
@@ -152,12 +178,12 @@ def main():
             Resize(img_size, img_size, p=1)
         ])
         test_dataset = KDDatasetTest(test_df, img_size, TEST_IMAGE_PATH, id_colname=ID_COLUMNS,
-                                     transforms=test_augmentation, n_tta=2)
+                                     transforms=test_augmentation, n_tta=n_tta)
         test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
 
         model.load_state_dict(torch.load(save_path))
 
-        pred = predict(model, test_loader, device, N_CLASSES, n_tta=2)
+        pred = predict(model, test_loader, device, N_CLASSES, n_tta=n_tta)
         print(pred.shape)
         results = pd.DataFrame({"id": test_ids,
                                 "is_star": pred.reshape(-1)})

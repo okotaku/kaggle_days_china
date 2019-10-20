@@ -3,10 +3,11 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from torchvision import models
-from pretrainedmodels import se_resnext101_32x4d, se_resnext50_32x4d, senet154
-from pretrainedmodels import inceptionresnetv2
-from pretrainedmodels import pnasnet5large
-from pretrainedmodels import xception
+
+import sys
+sys.path.append("../input/pretrainedmodels")
+from senet import se_resnext101_32x4d, se_resnext50_32x4d, senet154
+from inceptionresnetv2 import inceptionresnetv2
 from efficientnet_pytorch import EfficientNet
 
 import sys
@@ -17,6 +18,22 @@ from layer import AdaptiveConcatPool2d, Flatten, SEBlock, GeM
 encoders = {
     "se_resnext50_32x4d": {
         "encoder": se_resnext50_32x4d,
+        "out_shape": 2048
+    },
+    "se_resnext101_32x4d": {
+        "encoder": se_resnext101_32x4d,
+        "out_shape": 2048
+    },
+    "inceptionresnetv2": {
+        "encoder": inceptionresnetv2,
+        "out_shape": 1536
+    },
+    "resnet34": {
+        "encoder": models.resnet34,
+        "out_shape": 512
+    },
+    "resnet50": {
+        "encoder": models.resnet50,
         "out_shape": 2048
     }
 }
@@ -77,21 +94,55 @@ class CnnModel(nn.Module):
     def __init__(self, num_classes, encoder="se_resnext50_32x4d", pretrained="imagenet", pool_type="concat"):
         super().__init__()
         self.net = encoders[encoder]["encoder"](pretrained=pretrained)
-        if pool_type == "concat":
-            self.net.avg_pool = AdaptiveConcatPool2d()
-            out_shape = encoders[encoder]["out_shape"]*2
-        elif pool_type == "avg":
-            self.net.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-            out_shape = encoders[encoder]["out_shape"]
-        elif pool_type == "gem":
-            self.net.avg_pool = GeM()
-            out_shape = encoders[encoder]["out_shape"]
-        self.net.last_linear = nn.Sequential(
-            Flatten(),
-            SEBlock(out_shape),
-            nn.Dropout(),
-            nn.Linear(out_shape, num_classes)
-        )
+
+        if encoder in ["resnet34", "resnet50"]:
+            if pool_type == "concat":
+                self.net.avgpool = AdaptiveConcatPool2d()
+                out_shape = encoders[encoder]["out_shape"] * 2
+            elif pool_type == "avg":
+                self.net.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+                out_shape = encoders[encoder]["out_shape"]
+            elif pool_type == "gem":
+                self.net.avgpool = GeM()
+                out_shape = encoders[encoder]["out_shape"]
+            self.net.fc = nn.Sequential(
+                Flatten(),
+                SEBlock(out_shape),
+                nn.Dropout(),
+                nn.Linear(out_shape, num_classes)
+            )
+        elif encoder == "inceptionresnetv2":
+            if pool_type == "concat":
+                self.net.avgpool_1a = AdaptiveConcatPool2d()
+                out_shape = encoders[encoder]["out_shape"] * 2
+            elif pool_type == "avg":
+                self.net.avgpool_1a = nn.AdaptiveAvgPool2d((1, 1))
+                out_shape = encoders[encoder]["out_shape"]
+            elif pool_type == "gem":
+                self.net.avgpool_1a = GeM()
+                out_shape = encoders[encoder]["out_shape"]
+            self.net.last_linear = nn.Sequential(
+                Flatten(),
+                SEBlock(out_shape),
+                nn.Dropout(),
+                nn.Linear(out_shape, num_classes)
+            )
+        else:
+            if pool_type == "concat":
+                self.net.avg_pool = AdaptiveConcatPool2d()
+                out_shape = encoders[encoder]["out_shape"] * 2
+            elif pool_type == "avg":
+                self.net.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+                out_shape = encoders[encoder]["out_shape"]
+            elif pool_type == "gem":
+                self.net.avg_pool = GeM()
+                out_shape = encoders[encoder]["out_shape"]
+            self.net.last_linear = nn.Sequential(
+                Flatten(),
+                SEBlock(out_shape),
+                nn.Dropout(),
+                nn.Linear(out_shape, num_classes)
+            )
 
 
     def fresh_params(self):
