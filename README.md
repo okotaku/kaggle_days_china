@@ -1,4 +1,6 @@
 # kaggle_days_china
+All scripts are runned on kaggle kernel.  
+Add srd directory on kaggle dataset and use it as a library.
 
 # Final model
 exp4_seres_multi.py Public=0.90804 Private=0.89669  
